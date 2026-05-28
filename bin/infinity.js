@@ -1,10 +1,16 @@
 #!/usr/bin/env node
 /**
  * infinity CLI - AI-friendly editor for the infinity-web project
+ *
+ * Stage 2.5: 加入自动版本检查
  */
 
 import { Command } from "commander";
 import chalk from "chalk";
+import { readFile } from "fs/promises";
+import { fileURLToPath } from "url";
+import path from "path";
+
 import {
   cmdStatus,
   cmdTitle,
@@ -27,14 +33,37 @@ import {
   dnaRemove,
 } from "../src/commands.js";
 
+import { checkForUpdate, printUpdateNotice } from "../src/version-check.js";
+
+// ============ 读取本 CLI 的版本号 ============
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const pkgPath = path.join(__dirname, "..", "package.json");
+const pkg = JSON.parse(await readFile(pkgPath, "utf-8"));
+const CURRENT_VERSION = pkg.version;
+
+// ============ 后台异步检查更新(不阻塞主流程) ============
+// 注意:这是 fire-and-forget 模式,Promise 自己跑完
+const updateCheckPromise = checkForUpdate(CURRENT_VERSION);
+
+// 程序结束前,如果检查完成了,打印提示
+// 用 process.on('exit') 不行(异步操作不会被等),用一个小技巧:
+async function printUpdateIfReady() {
+  // 给检查最多 2 秒,超时就不等了
+  const timeoutPromise = new Promise((resolve) => setTimeout(() => resolve(null), 2000));
+  const result = await Promise.race([updateCheckPromise, timeoutPromise]);
+  printUpdateNotice(result);
+}
+
+// ============ 主程序 ============
 const program = new Command();
 
 program
   .name("infinity")
   .description("CLI for editing the infinity-web project")
-  .version("0.2.0")
+  .version(CURRENT_VERSION)
   .option("--json", "Output as JSON (for AI agents)")
-  .option("--project <path>", "Project directory", ".");
+  .option("--project <path>", "Project directory", ".")
+  .option("--no-update-check", "Skip version check (for CI/scripts)");
 
 // ============ status ============
 program
@@ -118,7 +147,7 @@ dna.command("remove <title>")
   .description("Remove a DNA card")
   .action((title) => dnaRemove({ ...program.opts(), title }));
 
-// ============ content (通用兜底) ============
+// ============ content ============
 const content = program.command("content").description("Edit text via CSS selector (fallback)");
 content.command("set <selector> <text>")
   .description("Update text. Use this when no specific command fits.")
@@ -161,40 +190,66 @@ program
   .option("--port <port>", "Port", "8080")
   .action((opts) => cmdPreview({ ...program.opts(), ...opts }));
 
+// ============ check-update (手动触发) ============
+program
+  .command("check-update")
+  .description("Manually check for updates")
+  .action(async () => {
+    console.log(chalk.gray(`Current version: ${CURRENT_VERSION}`));
+    console.log(chalk.gray("Checking GitHub for latest release..."));
+    const result = await checkForUpdate(CURRENT_VERSION);
+    if (!result) {
+      console.log(chalk.red("Failed to check (no network or repo not found)"));
+      return;
+    }
+    if (result.hasUpdate) {
+      printUpdateNotice(result);
+    } else {
+      console.log(chalk.green(`✓ You're on the latest version (${CURRENT_VERSION})`));
+    }
+  });
+
 // ============ help ============
 program.addHelpText("after", `
-${chalk.bold("Examples for infinity-web:")}
+${chalk.bold("Examples:")}
   ${chalk.gray("# Always check status first")}
   $ infinity status
 
   ${chalk.gray("# Hero section")}
-  $ infinity hero get
   $ infinity hero set --tagline "新口号" --subtitle "since 1993"
 
-  ${chalk.gray("# Ventures (subsidiary cards)")}
+  ${chalk.gray("# Ventures")}
   $ infinity venture list
-  $ infinity venture add --name "Infinity X" --desc "..." --url "https://..." --logo "https://..."
+  $ infinity venture add --name "New Co" --desc "..." --url "..." --logo "..."
   $ infinity venture update "Infinity Medical" --desc "新描述"
-  $ infinity venture remove "OldVenture"
 
-  ${chalk.gray("# DNA achievement cards")}
-  $ infinity dna list
+  ${chalk.gray("# DNA cards")}
   $ infinity dna add --title "新成就" --desc "..." --icon "fas fa-trophy"
-  $ infinity dna update "Pioneer Fund" --desc "新描述"
 
   ${chalk.gray("# Safety: backup before risky changes")}
   $ infinity backup --message "before redesign"
   $ infinity restore <id>
 
-  ${chalk.gray("# Fallback for other text")}
-  $ infinity content set ".impact-card-number" "1000+"
+  ${chalk.gray("# Manually check for updates")}
+  $ infinity check-update
 
 ${chalk.bold("For AI Agents:")}
   Read AGENTS.md in the project root.
   Always run 'infinity status' first.
 `);
 
-program.parseAsync(process.argv).catch((err) => {
+// ============ 解析 + 收尾 ============
+try {
+  await program.parseAsync(process.argv);
+} catch (err) {
   console.error(chalk.red("Error:"), err.message);
+  // 出错也要尝试打印升级提示
+  await printUpdateIfReady();
   process.exit(1);
-});
+}
+
+// 主命令完成后,打印升级提示(如果有的话)
+// 但如果是 --json 模式,不打印(避免污染输出)
+if (!program.opts().json) {
+  await printUpdateIfReady();
+}

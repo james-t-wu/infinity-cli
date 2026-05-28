@@ -1,19 +1,10 @@
-# Node
 node_modules/
 npm-debug.log
-yarn-error.log
-
-# Environment
 .env
-.env.local
-
-# Editor
+.DS_Store
 .vscode/
 .idea/
 *.swp
-.DS_Store
-
-# Build output
 dist/
 build/
 *.tgz
